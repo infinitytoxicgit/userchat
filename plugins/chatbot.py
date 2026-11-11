@@ -22,14 +22,28 @@ async def toggle_chatbot(client: Client, message: Message):
         await update_chat_settings(chat_id, "chatbot", False)
         await message.reply("AI Chatbot is chat ke liye **OFF** ho gaya hai.")
 
-async def ask_ai_service(prompt: str) -> str:
-    # Dummy mock response / Free API endpoint
-    # Agar API quota khatam ho jaye:
+async def ask_gemini(prompt: str) -> str:
     if not CHATBOT_API_KEY:
         raise Exception("API_KEY_EXHAUSTED")
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CHATBOT_API_KEY}"
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"You are a friendly, witty Telegram chat buddy. Reply shortly in natural Hinglish or English without long essays. User said: {prompt}"}]
+        }]
+    }
+
     async with aiohttp.ClientSession() as session:
-        # Example call
-        return f"Hello! Reply for: {prompt}"
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 429:
+                raise Exception("API_KEY_EXHAUSTED")
+            if resp.status != 200:
+                return "Abhi network busy hai bhai, thodi der me reply karta hu!"
+            data = await resp.json()
+            try:
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except (KeyError, IndexError):
+                return "Samajh nahi aaya bhai!"
 
 @Client.on_message(filters.text & filters.group, group=10)
 async def handle_ai_mentions(client: Client, message: Message):
@@ -38,27 +52,24 @@ async def handle_ai_mentions(client: Client, message: Message):
     if not chat_settings.get("chatbot", False):
         return
 
-    # Check if message mentions client accounts or replies to them
-    bot_names = ["bot", "shinobi", "assistant"]
-    is_mentioned = any(name in message.text.lower() for name in bot_names)
-    
-    if is_mentioned or (message.reply_to_message and message.reply_to_message.from_user):
+    bot_names = ["bot", "shinobi", "assistant", "bhai"]
+    is_mentioned = any(name in message.text.lower().split() for name in bot_names)
+    is_reply_to_me = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_self)
+
+    if is_mentioned or is_reply_to_me:
         try:
-            response = await ask_ai_service(message.text)
-            
-            # Select any random connected userbot to answer
+            response = await ask_gemini(message.text)
             responder = random.choice(clients) if clients else client
+            user_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
             
-            reply_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
             await responder.send_message(
                 message.chat.id,
-                f"{reply_tag} {response}",
+                f"{user_tag} {response}",
                 reply_to_message_id=message.id
             )
         except Exception as e:
             if "API_KEY_EXHAUSTED" in str(e):
-                # Alert owner in DM
                 await client.send_message(
                     OWNER_ID,
-                    "⚠️ **Alert:** Chatbot API limits/quota exhaust ho gaya hai! Kripya new API key create karke set karo."
+                    "⚠️ **Alert:** Chatbot Gemini API quota limit touch ho gaya hai! Kripya new key update karein."
                 )
