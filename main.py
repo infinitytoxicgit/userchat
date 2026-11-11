@@ -1,50 +1,50 @@
-from motor.motor_asyncio import AsyncIOMotorClient
-from config import MONGO_URL, OWNER_ID
+import asyncio
+import logging
+from pyrogram import Client
+from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID
+from database import get_all_sessions
 
-client = AsyncIOMotorClient(MONGO_URL)
-db = client["multi_assistant_bot"]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("MultiBot")
 
-sessions_col = db["sessions"]
-auth_col = db["auth_users"]
-chats_col = db["chats_settings"]
-api_keys_col = db["api_keys"]
+bot = Client(
+    "MainBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    plugins=dict(root="plugins")
+)
 
-# Auth system
-async def is_auth(user_id: int) -> bool:
-    if user_id == OWNER_ID:
-        return True
-    user = await auth_col.find_one({"user_id": user_id})
-    return bool(user)
+# Store loaded userbots in runtime memory
+clients = []
 
-async def add_auth(user_id: int):
-    await auth_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+async def init_clients():
+    sessions = await get_all_sessions()
+    logger.info(f"Loading {len(sessions)} saved userbot sessions...")
+    for idx, s in enumerate(sessions):
+        try:
+            cli = Client(
+                name=f"ubot_{idx}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=s,
+                in_memory=True
+            )
+            await cli.start()
+            clients.append(cli)
+        except Exception as e:
+            logger.error(f"Failed to start session {idx}: {e}")
 
-async def remove_auth(user_id: int):
-    await auth_col.delete_one({"user_id": user_id})
+async def main():
+    await bot.start()
+    bot_me = await bot.get_me()
+    logger.info(f"Bot started as @{bot_me.username}")
+    
+    await init_clients()
+    logger.info(f"Active Userbot Clients: {len(clients)}")
+    
+    await asyncio.Event().wait()
 
-async def get_all_auth():
-    return [doc["user_id"] async for doc in auth_col.find()]
-
-# Sessions
-async def save_session(session_string: str, phone: str = ""):
-    await sessions_col.update_one(
-        {"session_string": session_string},
-        {"$set": {"session_string": session_string, "phone": phone}},
-        upsert=True
-    )
-
-async def get_all_sessions():
-    return [doc["session_string"] async for doc in sessions_col.find()]
-
-async def delete_session(session_string: str):
-    await sessions_col.delete_one({"session_string": session_string})
-
-# Settings per Chat
-async def get_chat_settings(chat_id: int):
-    chat = await chats_col.find_one({"chat_id": chat_id})
-    if not chat:
-        return {"chatbot": False, "welcome": False, "welcome_msg": "Welcome {mention}!", "welcome_buttons": []}
-    return chat
-
-async def update_chat_settings(chat_id: int, key: str, value):
-    await chats_col.update_one({"chat_id": chat_id}, {"$set": {key: value}}, upsert=True)
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
