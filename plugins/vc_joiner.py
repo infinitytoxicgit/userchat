@@ -1,6 +1,6 @@
 import os
+import wave
 import asyncio
-import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import UserAlreadyParticipant
@@ -12,15 +12,15 @@ pytgcalls_instances = {}
 started_calls = set()
 active_vc_sessions = {}
 
-SILENT_AUDIO = "silence.mp3"
+SILENT_AUDIO = "silence.wav"
 
 def ensure_silent_audio():
     if not os.path.exists(SILENT_AUDIO):
-        subprocess.run(
-            ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", "5", "-q:a", "9", "-acodec", "libmp3lame", SILENT_AUDIO, "-y"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        with wave.open(SILENT_AUDIO, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(b"\x00\x00" * 48000 * 3)
 
 def get_call_instance(client_instance, idx: int) -> PyTgCalls:
     if idx not in pytgcalls_instances:
@@ -61,7 +61,11 @@ async def join_vc_handler(client: Client, message: Message):
     if not target_indices:
         return await message.reply(f"❌ Invalid ID number! Total active sessions: `{len(clients)}`")
 
-    ensure_silent_audio()
+    try:
+        ensure_silent_audio()
+    except Exception as e:
+        return await message.reply(f"❌ Audio file error: `{e}`")
+
     status_msg = await message.reply(f"⏳ **Target IDs ({len(target_indices)}) ko is group ki VC me join karwa rahe hain...**")
 
     joined_list = []
@@ -77,7 +81,6 @@ async def join_vc_handler(client: Client, message: Message):
         call_app = get_call_instance(cli, idx)
 
         try:
-            # Agar userbot group me nahi hai toh public username se join karne ki koshish kare
             if message.chat.username:
                 try:
                     await cli.join_chat(message.chat.username)
@@ -87,24 +90,24 @@ async def join_vc_handler(client: Client, message: Message):
                     pass
 
             if idx not in started_calls:
-                await call_app.start()
+                await asyncio.wait_for(call_app.start(), timeout=15)
                 started_calls.add(idx)
 
-            # Agar ID pehle se kisi dusri GC me hai toh wahan se leave karwao
             if idx in active_vc_sessions and active_vc_sessions[idx] != chat_id:
                 try:
                     await call_app.leave_call(active_vc_sessions[idx])
                 except Exception:
                     pass
 
-            await call_app.play(chat_id, stream)
+            await asyncio.wait_for(call_app.play(chat_id, stream), timeout=15)
             active_vc_sessions[idx] = chat_id
             joined_list.append(f"`#{idx + 1}`")
             await asyncio.sleep(1.2)
 
+        except asyncio.TimeoutError:
+            failed_list.append(f"`#{idx + 1}` (Timeout - Group me userbot added nahi hai ya VC off hai)")
         except Exception as e:
-            err_name = type(e).__name__
-            failed_list.append(f"`#{idx + 1}` ({err_name})")
+            failed_list.append(f"`#{idx + 1}` ({type(e).__name__}: {e})")
 
     report = (
         f"✅ **VC Join Task Completed!**\n\n"
