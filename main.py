@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import pyromod
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID
 from database import get_all_sessions
@@ -15,7 +16,6 @@ bot = Client(
     plugins=dict(root="plugins")
 )
 
-# Store loaded userbots in runtime memory
 clients = []
 
 async def init_clients():
@@ -39,10 +39,10 @@ async def main():
     await bot.start()
     bot_me = await bot.get_me()
     logger.info(f"Bot started as @{bot_me.username}")
-    
+
     await init_clients()
     logger.info(f"Active Userbot Clients: {len(clients)}")
-    
+
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
