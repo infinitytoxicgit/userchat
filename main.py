@@ -1,9 +1,13 @@
 import asyncio
 import logging
 import pyrogram.utils
+import pyrogram.errors
 
-# Pyrogram 2.0.106 me -1003xxxxxxxxx jaise naye supergroup IDs ka fix
+if not hasattr(pyrogram.errors, "GroupcallForbidden"):
+    pyrogram.errors.GroupcallForbidden = pyrogram.errors.RPCError
+
 pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
+
 
 import pyromod
 from pyrogram import Client
