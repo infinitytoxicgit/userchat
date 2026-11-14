@@ -6,7 +6,7 @@ from pyrogram import Client, filters, raw
 from pyrogram.types import Message
 from pyrogram.errors import UserAlreadyParticipant
 from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream
+from pytgcalls.types import MediaStream, AudioQuality
 from database import is_auth
 
 pytgcalls_instances = {}
@@ -22,7 +22,15 @@ def ensure_silent_audio():
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(48000)
-            wf.writeframes(b"\x00\x00" * 48000 * 5)
+            wf.writeframes(b"\x00\x00" * 48000 * 10)
+
+def make_stream():
+    ensure_silent_audio()
+    return MediaStream(
+        SILENT_AUDIO,
+        audio_parameters=AudioQuality.HIGH,
+        video_flags=MediaStream.Flags.IGNORE
+    )
 
 def get_call_instance(client_instance, idx: int) -> PyTgCalls:
     if idx not in pytgcalls_instances:
@@ -30,25 +38,19 @@ def get_call_instance(client_instance, idx: int) -> PyTgCalls:
 
         @call_app.on_update()
         async def _keep_alive_handler(client, update):
-            # Jab tak chat persistent_vc_chats me hai aur session assigned hai, silent loop chalu rakho
             cid = active_vc_sessions.get(idx)
             if cid and idx in persistent_vc_chats.get(cid, []):
                 if "StreamEnded" in type(update).__name__:
                     try:
-                        ensure_silent_audio()
-                        await call_app.play(
-                            cid,
-                            MediaStream(SILENT_AUDIO, video_flags=MediaStream.Flags.IGNORE)
-                        )
+                        await call_app.play(cid, make_stream())
                     except Exception:
                         pass
 
         pytgcalls_instances[idx] = call_app
     return pytgcalls_instances[idx]
 
-async def resolve_and_prepare_chat(cli: Client, chat):
+async def prepare_userbot_peer(cli: Client, chat):
     chat_id = chat.id
-    # Public group ho toh username se join karo
     if getattr(chat, "username", None):
         try:
             await cli.join_chat(chat.username)
@@ -57,17 +59,26 @@ async def resolve_and_prepare_chat(cli: Client, chat):
         except Exception:
             pass
 
-    # Private group peer cache load karo taaki PyTgCalls hang na ho
     try:
-        await cli.get_chat(chat_id)
+        await cli.resolve_peer(chat_id)
     except Exception:
-        async for dialog in cli.get_dialogs(limit=50):
+        async for dialog in cli.get_dialogs(limit=100):
             if dialog.chat.id == chat_id:
                 break
+        await cli.resolve_peer(chat_id)
 
-async def try_start_group_vc(cli: Client, chat_id: int) -> tuple[bool, str]:
+async def is_vc_active_and_start_if_admin(cli: Client, chat_id: int) -> tuple[bool, str]:
     try:
         peer = await cli.resolve_peer(chat_id)
+        if isinstance(peer, raw.types.InputPeerChannel):
+            full = await cli.invoke(raw.functions.channels.GetFullChannel(channel=peer))
+        else:
+            full = await cli.invoke(raw.functions.messages.GetFullChat(chat_id=peer.chat_id))
+
+        if getattr(full.full_chat, "call", None):
+            return True, "Active"
+
+        # VC off hai — ab userbot admin rights se start karne ki koshish karo
         await cli.invoke(
             raw.functions.phone.CreateGroupCall(
                 peer=peer,
@@ -75,25 +86,31 @@ async def try_start_group_vc(cli: Client, chat_id: int) -> tuple[bool, str]:
                 title="Voice Chat"
             )
         )
-        await asyncio.sleep(1.5)
-        return True, "Started"
+        await asyncio.sleep(2)
+        return True, "Auto-Started by Admin Userbot"
     except Exception as e:
         err = str(e)
         if "GROUPCALL_ALREADY_STARTED" in err:
-            return True, "Already Active"
-        if "CHAT_ADMIN_REQUIRED" in err:
-            return False, "VC is off & Userbot is not Admin to start it"
-        return False, type(e).__name__
+            return True, "Active"
+        if "CHAT_ADMIN_REQUIRED" in err or "GROUPCALL_FORBIDDEN" in err:
+            return False, "VC is OFF & Userbot lacks 'Manage Video Chats' Admin right"
+        return False, f"{type(e).__name__}: {e}"
 
 async def connect_single_session_to_vc(cli: Client, idx: int, chat) -> tuple[bool, str]:
     chat_id = chat.id
     call_app = get_call_instance(cli, idx)
-    ensure_silent_audio()
-    stream = MediaStream(SILENT_AUDIO, video_flags=MediaStream.Flags.IGNORE)
 
     try:
-        await resolve_and_prepare_chat(cli, chat)
+        await prepare_userbot_peer(cli, chat)
+    except Exception as e:
+        return False, f"Userbot not in group ({type(e).__name__})"
 
+    # Pehle check karo VC on hai ya nahi; off hai aur userbot admin hai toh auto-start karo
+    vc_ok, vc_status = await is_vc_active_and_start_if_admin(cli, chat_id)
+    if not vc_ok:
+        return False, vc_status
+
+    try:
         if idx not in started_calls:
             await asyncio.wait_for(call_app.start(), timeout=15)
             started_calls.add(idx)
@@ -104,25 +121,13 @@ async def connect_single_session_to_vc(cli: Client, idx: int, chat) -> tuple[boo
             except Exception:
                 pass
 
-        try:
-            await asyncio.wait_for(call_app.play(chat_id, stream), timeout=15)
-        except Exception as play_err:
-            err_str = str(play_err)
-            # Agar group me VC band hai toh admin hone par khud start kare
-            if "NoActiveGroupCall" in type(play_err).__name__ or "GROUPCALL" in err_str.upper() or "not found" in err_str.lower():
-                started, reason = await try_start_group_vc(cli, chat_id)
-                if not started:
-                    return False, f"VC Not Started ({reason})"
-                await asyncio.wait_for(call_app.play(chat_id, stream), timeout=15)
-            else:
-                raise play_err
-
+        await asyncio.wait_for(call_app.play(chat_id, make_stream()), timeout=15)
         active_vc_sessions[idx] = chat_id
-        return True, "Connected"
+        return True, vc_status
     except asyncio.TimeoutError:
-        return False, "Timeout (Check if Userbot is in this Group)"
+        return False, "Connection Timeout"
     except Exception as e:
-        return False, f"{type(e).__name__}"
+        return False, f"{type(e).__name__}: {e}"
 
 @Client.on_message(filters.command("joinvc") & filters.group)
 async def join_vc_handler(client: Client, message: Message):
@@ -161,20 +166,23 @@ async def join_vc_handler(client: Client, message: Message):
 
     status_msg = await message.reply(f"🔄 **Connecting {len(target_indices)} session(s) to Voice Chat...**")
 
-    # Persistent VC lock ON kar do is group ke liye
+    # 24/7 Persistent Lock ON karo
     existing = persistent_vc_chats.get(chat_id, [])
     for idx in target_indices:
         if idx not in existing:
             existing.append(idx)
     persistent_vc_chats[chat_id] = existing
 
+    # Agar koi admin userbot list me hai toh usko pehle run karo taaki wo VC start kar de
+    ordered_indices = sorted(target_indices)
     joined_list = []
     failed_list = []
 
-    for idx in target_indices:
+    for idx in ordered_indices:
         ok, info = await connect_single_session_to_vc(clients[idx], idx, message.chat)
         if ok:
-            joined_list.append(f"`#{idx + 1}`")
+            tag = " *(Started VC)*" if "Auto-Started" in info else ""
+            joined_list.append(f"`#{idx + 1}`{tag}")
         else:
             failed_list.append(f"`#{idx + 1}` ({info})")
         await asyncio.sleep(1)
@@ -189,7 +197,6 @@ async def join_vc_handler(client: Client, message: Message):
     )
     await status_msg.edit(report)
 
-# Agar VC end hokar dubara start ho toh automatically assigned IDs rejoin kar lein
 @Client.on_message(filters.video_chat_started & filters.group)
 async def auto_rejoin_on_vc_restart(client: Client, message: Message):
     chat_id = message.chat.id
@@ -197,17 +204,22 @@ async def auto_rejoin_on_vc_restart(client: Client, message: Message):
         return
 
     from main import clients
-    await asyncio.sleep(2)
+    await asyncio.sleep(2.5)
     rejoined = []
+    failed = []
     for idx in list(persistent_vc_chats[chat_id]):
         if 0 <= idx < len(clients):
-            ok, _ = await connect_single_session_to_vc(clients[idx], idx, message.chat)
+            ok, info = await connect_single_session_to_vc(clients[idx], idx, message.chat)
             if ok:
                 rejoined.append(f"`#{idx + 1}`")
+            else:
+                failed.append(f"`#{idx + 1}` ({info})")
             await asyncio.sleep(1)
 
     if rejoined:
         await message.reply(f"♻️ **Auto-Rejoined Voice Chat:** {', '.join(rejoined)}")
+    elif failed:
+        await message.reply(f"⚠️ **Auto-Rejoin Failed:** {', '.join(failed)}")
 
 @Client.on_message(filters.command("leavevc") & filters.group)
 async def leave_vc_handler(client: Client, message: Message):
