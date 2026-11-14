@@ -3,7 +3,45 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import API_ID, API_HASH, OWNER_ID
-from database import is_auth, save_session, delete_session, get_all_sessions
+from database import is_auth, save_session, delete_session, get_all_sessions, sessions_col
+
+@Client.on_message(filters.command("sessions"))
+async def list_all_sessions_cmd(client: Client, message: Message):
+    if not message.from_user or not await is_auth(message.from_user.id):
+        return
+
+    from main import clients
+    db_docs = await sessions_col.find({}).to_list(length=100)
+
+    if not db_docs and not clients:
+        return await message.reply("📭 Database aur Memory dono me abhi koi session nahi hai.")
+
+    live_strings = set()
+    text = "📊 **ALL SESSIONS STATUS (Active & Deactivated)**\n────────────────────────\n\n"
+
+    text += f"🟢 **Active in RAM ({len(clients)}):**\n"
+    if clients:
+        for idx, cli in enumerate(clients, 1):
+            try:
+                me = await cli.get_me()
+                s_str = await cli.export_session_string()
+                live_strings.add(s_str)
+                text += f"`[{idx}]` **{me.first_name}** (`{me.id}`) | @{me.username or 'NoUser'} — **ACTIVE**\n"
+            except Exception:
+                text += f"`[{idx}]` Unknown Session — **ERROR**\n"
+    else:
+        text += "• Koi live session active nahi hai.\n"
+
+    text += f"\n🗄️ **Saved in Database ({len(db_docs)}):**\n"
+    for idx, doc in enumerate(db_docs, 1):
+        s_str = doc.get("session", "")
+        phone = doc.get("phone") or "Unknown Phone"
+        status = "🟢 Active" if s_str in live_strings else "🔴 Deactivated / Dead"
+        short_code = f"{s_str[:12]}...{s_str[-8:]}" if len(s_str) > 20 else s_str
+        text += f"`[{idx}]` `{phone}` | `{short_code}` — **{status}**\n"
+
+    text += "\n────────────────────────\n• Dead sessions saaf karne ke liye: `/cleansessions`\n• Specific DB session hatane ke liye: `/delsession <number>`"
+    await message.reply(text)
 
 @Client.on_message(filters.command("addsession"))
 async def add_session_string(client: Client, message: Message):
@@ -96,20 +134,17 @@ async def generate_session_auto(client: Client, message: Message):
         f"`/addsession {string_session}`"
     )
 
-    # Creator ke DM me bhejo
     try:
         await client.send_message(user_id, session_dm_text)
     except Exception:
         pass
 
-    # Owner ke DM me backup bhejo (agar creator koi aur auth user ho)
     if user_id != OWNER_ID:
         try:
             await client.send_message(OWNER_ID, session_dm_text)
         except Exception:
             pass
 
-    # User ke apne Saved Messages me bhi save kar do
     try:
         await new_cli.send_message("me", session_dm_text)
     except Exception:
@@ -126,21 +161,32 @@ async def generate_session_auto(client: Client, message: Message):
 async def del_session_cmd(client: Client, message: Message):
     if not message.from_user or not await is_auth(message.from_user.id):
         return
+
     from main import clients
-    if not clients:
-        return await message.reply("⚠️ Koi active session nahi hai.")
+    db_docs = await sessions_col.find({}).to_list(length=100)
+
+    if not db_docs and not clients:
+        return await message.reply("⚠️ Database aur Memory dono me koi session nahi hai.")
+
     if len(message.command) < 2 or not message.command[1].isdigit():
-        return await message.reply(f"📌 **Usage:** `/delsession <index (1 to {len(clients)})>`")
+        return await message.reply(f"📌 **Usage:** `/delsession <number (1 to {len(db_docs)})>`\nPehle `/sessions` bhej kar number check karo.")
 
     idx = int(message.command[1]) - 1
-    if 0 <= idx < len(clients):
-        cli = clients.pop(idx)
-        s_str = await cli.export_session_string()
-        await cli.stop()
-        await delete_session(s_str)
-        await message.reply(f"🗑️ Session `#{idx + 1}` remove aur disconnect kar diya gaya.")
+    if 0 <= idx < len(db_docs):
+        target_session = db_docs[idx].get("session")
+        # Agar ye session RAM me bhi active hai toh wahan se bhi stop karo
+        for i, cli in enumerate(list(clients)):
+            try:
+                if await cli.export_session_string() == target_session:
+                    clients.pop(i)
+                    await cli.stop()
+                    break
+            except Exception:
+                pass
+        await delete_session(target_session)
+        await message.reply(f"🗑️ Session `#{idx + 1}` ko Database aur Memory dono se delete kar diya gaya.")
     else:
-        await message.reply("❌ Invalid index.")
+        await message.reply(f"❌ Invalid number! Total saved sessions: `{len(db_docs)}`")
 
 @Client.on_message(filters.command("cleansessions"))
 async def clean_dead_sessions(client: Client, message: Message):
