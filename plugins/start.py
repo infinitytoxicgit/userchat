@@ -1,6 +1,7 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from database import is_auth, get_all_sessions
+from config import OWNER_ID, CHATBOT_API_KEY
+from database import is_auth, get_all_sessions, chats_col
 
 START_TEXT = (
     "👋 **Welcome to Group Activator & Multi-VC Bot!**\n\n"
@@ -39,7 +40,7 @@ async def session_shortcut(client: Client, message: Message):
         return
     from main import clients
     saved = await get_all_sessions()
-    
+
     text = (
         f"📱 **Session Manager Overview**\n\n"
         f"• Active Running IDs: `{len(clients)}`\n"
@@ -111,6 +112,19 @@ async def back_home_cb(client: Client, query: CallbackQuery):
 async def open_panel_from_btn(client: Client, query: CallbackQuery):
     if not await is_auth(query.from_user.id):
         return await query.answer("Sirf Owner/Auth users ke liye!", show_alert=True)
-    from plugins.dm_pannel import owner_details_panel
-    await query.message.delete()
-    await owner_details_panel(client, query.message)
+
+    from main import clients
+    total_sessions = await get_all_sessions()
+    total_chats = await chats_col.count_documents({})
+    api_status = "🟢 Active" if CHATBOT_API_KEY else "🔴 Not Set"
+
+    panel_text = (
+        "👑 **LIVE SYSTEM PANEL**\n"
+        "────────────────────────\n"
+        f"🔑 **Chatbot API:** {api_status}\n"
+        f"📱 **Active Sessions:** `{len(clients)}/{len(total_sessions)}`\n"
+        f"👥 **Configured Groups:** `{total_chats}`\n"
+        "────────────────────────\n"
+        "Full account list ke liye `/panel` bhejein."
+    )
+    await query.message.edit_text(panel_text, reply_markup=BACK_BUTTON)
