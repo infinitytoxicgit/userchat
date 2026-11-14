@@ -76,5 +76,10 @@ async def git_update(client: Client, message: Message):
 
     await client.send_message(OWNER_ID, "♻️ **Restarting Bot Engine now... Reconnecting all sessions.**")
 
+    # Purane sessions ko cleanly stop karo taaki AUTH_KEY_DUPLICATED na aaye
+    from main import stop_all_clients
+    await stop_all_clients()
+    await asyncio.sleep(1.5)
+
     # Process replace with active venv python
     os.execl(sys.executable, sys.executable, "main.py")
