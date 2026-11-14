@@ -1,17 +1,13 @@
 import asyncio
 import logging
-from collections import defaultdict
 import pyrogram.utils
 import pyrogram.errors
 
-# 1. PyTgCalls v3 compatibility patch
 if not hasattr(pyrogram.errors, "GroupcallForbidden"):
     pyrogram.errors.GroupcallForbidden = pyrogram.errors.RPCError
 
-# 2. 13-digit Supergroup IDs (-1003xxxxxxxxx) compatibility patch
 pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
 
-import pyromod
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID
 from database import get_all_sessions
@@ -27,10 +23,6 @@ bot = Client(
     plugins=dict(root="plugins")
 )
 
-# 3. Pyromod + Pyrofork Listener KeyError fix
-if not isinstance(getattr(bot, "listeners", None), defaultdict):
-    bot.listeners = defaultdict(list)
-
 clients = []
 
 async def init_clients():
@@ -45,8 +37,6 @@ async def init_clients():
                 session_string=s,
                 in_memory=True
             )
-            if not isinstance(getattr(cli, "listeners", None), defaultdict):
-                cli.listeners = defaultdict(list)
             await cli.start()
             clients.append(cli)
             await asyncio.sleep(1)
