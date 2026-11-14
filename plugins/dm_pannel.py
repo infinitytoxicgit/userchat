@@ -151,7 +151,7 @@ async def panel_reactivate_cb(client: Client, query: CallbackQuery):
     await query.answer("🔄 Reconnecting inactive sessions...")
 
     for doc in db_docs:
-        s_str = doc.get("session")
+        s_str = doc.get("session_string")
         if s_str and s_str not in live_strings:
             try:
                 new_cli = Client(f"ubot_re_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=s_str, in_memory=True)
@@ -196,7 +196,7 @@ async def panel_sessions_cb(client: Client, query: CallbackQuery):
     text = "📱 **SESSIONS MANAGER (NAME + NUMBER)**\n────────────────────────\n\n"
     if db_docs:
         for idx, doc in enumerate(db_docs, 1):
-            s_str = doc.get("session", "")
+            s_str = doc.get("session_string", "")
             name = doc.get("name") or "Unknown Name"
             phone = doc.get("phone") or "No Phone"
             uid = doc.get("user_id") or ""
