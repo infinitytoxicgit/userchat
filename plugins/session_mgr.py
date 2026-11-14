@@ -4,9 +4,8 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import API_ID, API_HASH, OWNER_ID
-from database import is_auth, delete_session, get_all_sessions, sessions_col
+from database import is_auth, save_session, delete_session, get_all_sessions, sessions_col
 
-# Valid ITU World Country Calling Codes (1 to 3 digits)
 VALID_COUNTRY_PREFIXES = (
     "1", "7",
     "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49",
@@ -37,7 +36,6 @@ def normalize_and_validate_phone(raw_input: str):
     if not digits.isdigit():
         return None, "❌ Invalid format! Sirf digits aur country code bhejo (e.g. `+919876543210` ya `919876543210`)."
 
-    # Agar user ne bina country code ke sirf 10 digit Indian/local number daala (jaise 9876543210)
     if not had_plus and len(digits) == 10 and digits[0] in ("6", "7", "8", "9"):
         return None, (
             "❌ **Country Code Missing hai!**\n"
@@ -46,12 +44,12 @@ def normalize_and_validate_phone(raw_input: str):
         )
 
     if len(digits) < 8 or len(digits) > 15:
-        return None, "❌ **Invalid Phone Number Length!** International number 8 se 15 digits ka hona chahiye (country code ke sath)."
+        return None, "❌ **Invalid Phone Number Length!** International number 8 se 15 digits ka hona chahiye."
 
     if not digits.startswith(VALID_COUNTRY_PREFIXES):
         return None, (
             f"❌ **Invalid Country Code (`+{digits[:3]}`):**\n"
-            "Ye world ke kisi bhi valid country code se match nahi karta! Sahi country code ke sath bhejo (e.g. `+91...`, `+1...`, `+44...`, `+971...`)."
+            "Ye world ke kisi bhi valid country code se match nahi karta! Sahi country code lagakar bhejo."
         )
 
     return f"+{digits}", None
@@ -59,18 +57,12 @@ def normalize_and_validate_phone(raw_input: str):
 async def save_full_session(session_str: str, me, phone: str = ""):
     final_phone = phone or (f"+{me.phone_number}" if getattr(me, "phone_number", None) and not str(me.phone_number).startswith("+") else (me.phone_number or "Unknown"))
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "Userbot Account"
-    await sessions_col.update_one(
-        {"session": session_str},
-        {
-            "$set": {
-                "session": session_str,
-                "phone": final_phone,
-                "name": full_name,
-                "user_id": me.id,
-                "username": me.username or ""
-            }
-        },
-        upsert=True
+    await save_session(
+        session_string=session_str,
+        phone=final_phone,
+        name=full_name,
+        user_id=me.id,
+        username=me.username or ""
     )
 
 async def start_create_flow(client: Client, chat_id: int, user_id: int):
@@ -222,7 +214,7 @@ async def list_all_sessions_cmd(client: Client, message: Message):
 
     text = "📊 **ALL SESSIONS (NAME + NUMBER + STATUS)**\n────────────────────────\n\n"
     for idx, doc in enumerate(db_docs, 1):
-        s_str = doc.get("session", "")
+        s_str = doc.get("session_string", "")
         name = doc.get("name") or "Unknown Name"
         phone = doc.get("phone") or "No Phone"
         uid = doc.get("user_id") or "N/A"
@@ -245,7 +237,7 @@ async def del_session_cmd(client: Client, message: Message):
 
     idx = int(message.command[1]) - 1
     if 0 <= idx < len(db_docs):
-        target_session = db_docs[idx].get("session")
+        target_session = db_docs[idx].get("session_string")
         for i, cli in enumerate(list(clients)):
             try:
                 if await cli.export_session_string() == target_session:
@@ -254,7 +246,10 @@ async def del_session_cmd(client: Client, message: Message):
                     break
             except Exception:
                 pass
-        await delete_session(target_session)
+        if target_session:
+            await delete_session(target_session)
+        else:
+            await sessions_col.delete_one({"_id": db_docs[idx]["_id"]})
         await message.reply(f"🗑️ Session `#{idx + 1}` delete kar diya gaya.")
     else:
         await message.reply(f"❌ Invalid number! Total sessions: `{len(db_docs)}`")
