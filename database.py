@@ -26,15 +26,23 @@ async def get_all_auth():
     return [doc["user_id"] async for doc in auth_col.find()]
 
 # Sessions
-async def save_session(session_string: str, phone: str = ""):
+async def save_session(session_string: str, phone: str = "", name: str = "", user_id: int = 0, username: str = ""):
     await sessions_col.update_one(
         {"session_string": session_string},
-        {"$set": {"session_string": session_string, "phone": phone}},
+        {
+            "$set": {
+                "session_string": session_string,
+                "phone": phone,
+                "name": name,
+                "user_id": user_id,
+                "username": username
+            }
+        },
         upsert=True
     )
 
 async def get_all_sessions():
-    return [doc["session_string"] async for doc in sessions_col.find()]
+    return [doc["session_string"] async for doc in sessions_col.find() if doc.get("session_string")]
 
 async def delete_session(session_string: str):
     await sessions_col.delete_one({"session_string": session_string})
