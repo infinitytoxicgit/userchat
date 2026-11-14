@@ -74,6 +74,14 @@ async def git_update(client: Client, message: Message):
     )
     await req_proc.communicate()
 
+    # Enforce pyrofork so standard pyrogram never overwrites it
+    fork_proc = await asyncio.create_subprocess_shell(
+        f"{sys.executable} -m pip uninstall -y pyrogram && {sys.executable} -m pip install --no-cache-dir --force-reinstall --no-deps pyrofork",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await fork_proc.communicate()
+
     await client.send_message(OWNER_ID, "♻️ **Restarting Bot Engine now... Reconnecting all sessions.**")
 
     # Purane sessions ko cleanly stop karo taaki AUTH_KEY_DUPLICATED na aaye
