@@ -32,8 +32,26 @@ async def init_clients():
             )
             await cli.start()
             clients.append(cli)
+            await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Failed to start session {idx}: {e}")
+            err_msg = f"⚠️ **Session #{idx + 1} Start Failed:**\n`{type(e).__name__}: {e}`"
+            logger.error(err_msg)
+            try:
+                await bot.send_message(OWNER_ID, err_msg)
+            except Exception:
+                pass
+
+async def stop_all_clients():
+    for cli in list(clients):
+        try:
+            await cli.stop()
+        except Exception:
+            pass
+    clients.clear()
+    try:
+        await bot.stop()
+    except Exception:
+        pass
 
 async def main():
     await bot.start()
@@ -46,5 +64,6 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
