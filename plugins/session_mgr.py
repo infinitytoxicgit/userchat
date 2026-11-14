@@ -3,7 +3,7 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import API_ID, API_HASH
-from database import is_auth, save_session, delete_session, get_all_sessions
+from database import is_auth, save_session, delete_session, get_all_sessions, sessions_col
 
 @Client.on_message(filters.command("addsession"))
 async def add_session_string(client: Client, message: Message):
@@ -72,6 +72,7 @@ async def generate_session_auto(client: Client, message: Message):
     me = await temp_cli.get_me()
     string_session = await temp_cli.export_session_string()
     await temp_cli.disconnect()
+    await asyncio.sleep(1.5)
 
     await save_session(string_session, phone)
     from main import clients
@@ -104,3 +105,19 @@ async def del_session_cmd(client: Client, message: Message):
         await message.reply(f"🗑️ Client index `{idx}` remove aur disconnect kar diya gaya.")
     else:
         await message.reply("❌ Invalid index.")
+
+@Client.on_message(filters.command("cleansessions"))
+async def clean_dead_sessions(client: Client, message: Message):
+    if not message.from_user or not await is_auth(message.from_user.id):
+        return
+    all_s = await get_all_sessions()
+    removed = 0
+    for s in all_s:
+        try:
+            test = Client(f"chk_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=s, in_memory=True)
+            await test.start()
+            await test.stop()
+        except Exception:
+            await delete_session(s)
+            removed += 1
+    await message.reply(f"🧹 **Database Cleanup Done!**\n• Dead/Expired Sessions Removed: `{removed}`")
