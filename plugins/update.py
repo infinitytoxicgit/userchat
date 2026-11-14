@@ -8,7 +8,10 @@ from database import is_auth
 
 @Client.on_message(filters.command("update") & (filters.private | filters.group))
 async def git_update(client: Client, message: Message):
-    if not await is_auth(message.from_user.id):
+    # Anonymous admin check (agar group se anonymous admin ne bheja ho)
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        pass
+    elif not message.from_user or not await is_auth(message.from_user.id):
         return
 
     status_msg = await message.reply("🔄 **Checking for upstream updates via Git...**")
