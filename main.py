@@ -3,8 +3,9 @@ import logging
 import pyrogram.utils
 import pyrogram.errors
 
-if not hasattr(pyrogram.errors, "GroupcallForbidden"):
-    pyrogram.errors.GroupcallForbidden = pyrogram.errors.RPCError
+for _err_name in ("GroupcallForbidden", "GroupcallInvalid", "GroupcallJoinMissing"):
+    if not hasattr(pyrogram.errors, _err_name):
+        setattr(pyrogram.errors, _err_name, pyrogram.errors.RPCError)
 
 pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
 
