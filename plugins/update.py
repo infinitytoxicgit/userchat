@@ -3,59 +3,75 @@ import sys
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from config import OWNER_ID
+from config import OWNER_ID, UPSTREAM_BRANCH
 from database import is_auth
 
-@Client.on_message(filters.command("update") & filters.private)
-@Client.on_message(filters.command("update") & filters.group)
+@Client.on_message(filters.command("update") & (filters.private | filters.group))
 async def git_update(client: Client, message: Message):
-    # Sirf Master Owner ya Authorized Admins ke liye
     if not await is_auth(message.from_user.id):
         return
 
-    # User ko DM aur chat dono jagah notice
     status_msg = await message.reply("🔄 **Checking for upstream updates via Git...**")
-    
-    # Git pull process execute
+
+    # Purana commit hash check karo
+    old_proc = await asyncio.create_subprocess_shell(
+        "git rev-parse --short HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    old_out, _ = await old_proc.communicate()
+    old_commit = old_out.decode().strip()
+
+    # Fetch aur Hard Reset taaki local edits kabhi conflict na karein
+    pull_cmd = f"git fetch origin {UPSTREAM_BRANCH} && git reset --hard origin/{UPSTREAM_BRANCH}"
     process = await asyncio.create_subprocess_shell(
-        "git pull",
+        pull_cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     stdout, stderr = await process.communicate()
-    output = stdout.decode().strip()
     errors = stderr.decode().strip()
 
-    if "Already up to date." in output:
-        msg_text = "✅ **Bot is already up-to-date with upstream branch.**\nKoi new changes nahi hain."
+    if process.returncode != 0:
+        return await status_msg.edit(f"❌ **Git Update Failed:**\n`{errors}`")
+
+    # Naya commit hash aur message check karo
+    new_proc = await asyncio.create_subprocess_shell(
+        "git log -1 --oneline",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    new_out, _ = await new_proc.communicate()
+    latest_log = new_out.decode().strip()
+    new_commit = latest_log.split()[0] if latest_log else ""
+
+    if old_commit == new_commit:
+        msg_text = f"✅ **Bot is already up-to-date!**\n**Current Commit:** `{latest_log}`"
         await status_msg.edit(msg_text)
         if message.chat.id != OWNER_ID:
             await client.send_message(OWNER_ID, msg_text)
         return
 
-    # Agar new commits pull hue hain
     update_report = (
-        "🚀 **Git Pull Successful!**\n\n"
-        f"**Git Output:**\n`{output}`\n\n"
+        "🚀 **Git Update Successful!**\n\n"
+        f"**Updated:** `{old_commit}..{new_commit}`\n"
+        f"**Latest:** `{latest_log}`\n\n"
         "📦 Installing any new dependencies & restarting core processes..."
     )
     await status_msg.edit(update_report)
-    
-    # Owner ke DM me alert
+
     if message.chat.id != OWNER_ID:
         await client.send_message(OWNER_ID, update_report)
 
-    # Auto requirements install check
+    # Auto requirements install
     req_proc = await asyncio.create_subprocess_shell(
-        "pip install --no-cache-dir -r requirements.txt",
+        f"{sys.executable} -m pip install --no-cache-dir -r requirements.txt",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     await req_proc.communicate()
 
-    # Restart bot instance gracefully
-    restart_alert = "♻️ **Restarting Bot Engine now... Reconnecting all sessions.**"
-    await client.send_message(OWNER_ID, restart_alert)
+    await client.send_message(OWNER_ID, "♻️ **Restarting Bot Engine now... Reconnecting all sessions.**")
 
-    # Process replace
+    # Process replace with active venv python
     os.execl(sys.executable, sys.executable, "main.py")
