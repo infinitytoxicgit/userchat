@@ -1,4 +1,5 @@
 import time
+import asyncio
 from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,8 +14,12 @@ def get_main_buttons():
             InlineKeyboardButton("🛑 Leave All VCs", callback_data="leave_all_vc")
         ],
         [
-            InlineKeyboardButton("📱 Sessions (Active/Dead)", callback_data="panel_sessions"),
+            InlineKeyboardButton("📱 Sessions (Name/Number)", callback_data="panel_sessions"),
             InlineKeyboardButton("🎙️ VC & Groups Info", callback_data="panel_vc_groups")
+        ],
+        [
+            InlineKeyboardButton("➕ Login New Session", callback_data="panel_login_session"),
+            InlineKeyboardButton("🔑 See String Sessions", callback_data="panel_see_strings")
         ]
     ])
 
@@ -41,8 +46,9 @@ async def build_panel_content():
     for idx, cli in enumerate(clients):
         try:
             me = await cli.get_me()
-            vc_tag = f" | 🎙️ In VC (`{active_vc_sessions[idx]}`)" if idx in active_vc_sessions else ""
-            sessions_detail_text += f"`[{idx + 1}]` {me.first_name} (`{me.id}`) | @{me.username or 'NoUser'}{vc_tag}\n"
+            phone = f"+{me.phone_number}" if me.phone_number else "NoPhone"
+            vc_tag = f" | 🎙️ VC (`{active_vc_sessions[idx]}`)" if idx in active_vc_sessions else ""
+            sessions_detail_text += f"`[{idx + 1}]` **{me.first_name}** (`{phone}`){vc_tag}\n"
         except Exception:
             sessions_detail_text += f"`[{idx + 1}]` [Offline/Reconnecting]\n"
 
@@ -65,10 +71,7 @@ async def build_panel_content():
         f"• Chatbot Active: `{chatbot_enabled_count}` Groups\n"
         f"• Welcome System Active: `{welcome_enabled_count}` Groups\n"
         "────────────────────────\n"
-        f"🕒 **Last Updated:** `{now_time}`\n"
-        "• `/update` - Pull commits & restart\n"
-        "• `/create` - Generate and link new session\n"
-        "• `/sessions` - Full session manager"
+        f"🕒 **Last Updated:** `{now_time}`"
     )
 
     return panel_text, get_main_buttons()
@@ -92,6 +95,87 @@ async def refresh_panel_cb(client: Client, query: CallbackQuery):
     except MessageNotModified:
         await query.answer("Already up to date!")
 
+@Client.on_callback_query(filters.regex("^panel_login_session$"))
+async def panel_login_session_cb(client: Client, query: CallbackQuery):
+    if not await is_auth(query.from_user.id):
+        return await query.answer("Access Denied.", show_alert=True)
+
+    await query.answer("📱 Login process started!")
+    from plugins.session_mgr import start_create_flow
+    await start_create_flow(client, query.message.chat.id, query.from_user.id)
+
+@Client.on_callback_query(filters.regex("^panel_see_strings$"))
+async def panel_see_strings_cb(client: Client, query: CallbackQuery):
+    if not await is_auth(query.from_user.id):
+        return await query.answer("Access Denied.", show_alert=True)
+
+    from main import clients
+    if not clients:
+        return await query.answer("⚠️ Abhi koi active session login nahi hai!", show_alert=True)
+
+    await query.answer("📩 Active String Sessions bhej rahe hain...")
+    for idx, cli in enumerate(clients, 1):
+        try:
+            me = await cli.get_me()
+            s_str = await cli.export_session_string()
+            phone = f"+{me.phone_number}" if me.phone_number else "Unknown"
+            await client.send_message(
+                query.from_user.id,
+                f"🔑 **ACTIVE SESSION #{idx}**\n"
+                f"• **Name:** {me.first_name} (`{me.id}`)\n"
+                f"• **Phone:** `{phone}`\n\n"
+                f"**Pyrogram v2 String (Tap to Copy):**\n`{s_str}`"
+            )
+        except Exception as e:
+            await client.send_message(query.from_user.id, f"❌ Session #{idx} export error: `{e}`")
+
+@Client.on_callback_query(filters.regex("^panel_reactivate$"))
+async def panel_reactivate_cb(client: Client, query: CallbackQuery):
+    if not await is_auth(query.from_user.id):
+        return await query.answer("Access Denied.", show_alert=True)
+
+    from main import clients
+    db_docs = await sessions_col.find({}).to_list(length=100)
+    if not db_docs:
+        return await query.answer("⚠️ Database me koi session nahi hai!", show_alert=True)
+
+    live_strings = set()
+    for cli in clients:
+        try:
+            live_strings.add(await cli.export_session_string())
+        except Exception:
+            pass
+
+    reconnected = 0
+    failed = 0
+    await query.answer("🔄 Reconnecting inactive sessions...")
+
+    for doc in db_docs:
+        s_str = doc.get("session")
+        if s_str and s_str not in live_strings:
+            try:
+                new_cli = Client(f"ubot_re_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=s_str, in_memory=True)
+                await new_cli.start()
+                clients.append(new_cli)
+                reconnected += 1
+                await asyncio.sleep(1)
+            except Exception:
+                failed += 1
+
+    if failed > 0 and reconnected == 0:
+        await client.send_message(
+            query.from_user.id,
+            f"⚠️ **{failed} Session(s) Telegram se permanently expire (`AUTH_KEY_UNREGISTERED`) ho chuke hain.**\n"
+            "Unhe dubara login karne ke liye **➕ Login New Session** button dabao."
+        )
+    else:
+        await client.send_message(
+            query.from_user.id,
+            f"🔄 **Reactivate Result:**\n• Reconnected: `{reconnected}`\n• Expired (Re-login needed): `{failed}`"
+        )
+
+    await panel_sessions_cb(client, query)
+
 @Client.on_callback_query(filters.regex("^panel_sessions$"))
 async def panel_sessions_cb(client: Client, query: CallbackQuery):
     if not await is_auth(query.from_user.id):
@@ -101,39 +185,43 @@ async def panel_sessions_cb(client: Client, query: CallbackQuery):
     from plugins.vc_joiner import active_vc_sessions
     db_docs = await sessions_col.find({}).to_list(length=100)
 
-    live_strings = set()
-    text = "📱 **SESSIONS OVERVIEW (ACTIVE & DEAD)**\n────────────────────────\n\n"
-    text += f"🟢 **Live Active Sessions ({len(clients)}):**\n"
+    live_map = {}
+    for idx, cli in enumerate(clients):
+        try:
+            s_str = await cli.export_session_string()
+            live_map[s_str] = idx
+        except Exception:
+            pass
 
-    if clients:
-        for idx, cli in enumerate(clients):
-            try:
-                me = await cli.get_me()
-                s_str = await cli.export_session_string()
-                live_strings.add(s_str)
-                vc_info = f"🎙️ VC: `{active_vc_sessions[idx]}`" if idx in active_vc_sessions else "💤 Idle"
-                text += f"`[{idx + 1}]` **{me.first_name}** (`{me.id}`) — {vc_info}\n"
-            except Exception:
-                text += f"`[{idx + 1}]` Unknown Session — ⚠️ Error\n"
-    else:
-        text += "• Koi live session active nahi hai.\n"
-
-    text += f"\n🗄️ **Database Saved Sessions ({len(db_docs)}):**\n"
+    text = "📱 **SESSIONS MANAGER (NAME + NUMBER)**\n────────────────────────\n\n"
     if db_docs:
         for idx, doc in enumerate(db_docs, 1):
             s_str = doc.get("session", "")
+            name = doc.get("name") or "Unknown Name"
             phone = doc.get("phone") or "No Phone"
-            status = "🟢 Active" if s_str in live_strings else "🔴 Deactivated/Dead"
-            text += f"`[{idx}]` `{phone}` — **{status}**\n"
+            uid = doc.get("user_id") or ""
+            if s_str in live_map:
+                mem_idx = live_map[s_str]
+                vc_tag = f" | 🎙️ VC: `{active_vc_sessions[mem_idx]}`" if mem_idx in active_vc_sessions else ""
+                status = f"🟢 Active{vc_tag}"
+            else:
+                status = "🔴 Deactivated/Dead"
+
+            id_part = f" (`{uid}`)" if uid else ""
+            text += f"`[{idx}]` **{name}**{id_part}\n    └ 📞 `{phone}` — **{status}**\n"
     else:
-        text += "• Database me koi session saved nahi hai.\n"
+        text += "• Abhi koi session saved nahi hai.\n"
 
     text += "\n────────────────────────\n💡 `/delsession <num>` se specific session hata sakte ho."
 
     buttons = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🧹 Clean Dead Sessions", callback_data="panel_clean_dead"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="panel_sessions")
+            InlineKeyboardButton("➕ Login New Session", callback_data="panel_login_session"),
+            InlineKeyboardButton("🔄 Reactivate All", callback_data="panel_reactivate")
+        ],
+        [
+            InlineKeyboardButton("🔑 See String Sessions", callback_data="panel_see_strings"),
+            InlineKeyboardButton("🧹 Clean Dead", callback_data="panel_clean_dead")
         ],
         [
             InlineKeyboardButton("🔙 Back to Main Panel", callback_data="refresh_panel")
