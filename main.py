@@ -1,5 +1,10 @@
 import asyncio
 import logging
+import pyrogram.utils
+
+# Pyrogram 2.0.106 me -1003xxxxxxxxx jaise naye supergroup IDs ka fix
+pyrogram.utils.MIN_CHANNEL_ID = -1009999999999
+
 import pyromod
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID
@@ -64,6 +69,5 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
