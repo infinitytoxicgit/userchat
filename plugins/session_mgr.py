@@ -2,8 +2,8 @@ import time
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from config import API_ID, API_HASH
-from database import is_auth, save_session, delete_session, get_all_sessions, sessions_col
+from config import API_ID, API_HASH, OWNER_ID
+from database import is_auth, save_session, delete_session, get_all_sessions
 
 @Client.on_message(filters.command("addsession"))
 async def add_session_string(client: Client, message: Message):
@@ -23,7 +23,11 @@ async def add_session_string(client: Client, message: Message):
         from main import clients
         clients.append(new_cli)
 
-        await message.reply(f"✅ **Session Active!**\n• **Account:** {me.first_name} (`{me.id}`)\n• **ID Number:** `#{len(clients)}`")
+        await message.reply(
+            f"✅ **Session Active!**\n"
+            f"• **Account:** {me.first_name} (`{me.id}`)\n"
+            f"• **ID Number:** `#{len(clients)}`"
+        )
     except Exception as e:
         await message.reply(f"❌ **Invalid Session:** `{e}`")
 
@@ -33,6 +37,8 @@ async def generate_session_auto(client: Client, message: Message):
         return
 
     chat_id = message.chat.id
+    user_id = message.from_user.id
+
     try:
         phone_msg = await client.ask(chat_id, "📱 Apna phone number bhejo country code ke sath (e.g. `+919876543210`):", timeout=120)
     except Exception:
@@ -72,7 +78,7 @@ async def generate_session_auto(client: Client, message: Message):
     me = await temp_cli.get_me()
     string_session = await temp_cli.export_session_string()
     await temp_cli.disconnect()
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2)
 
     await save_session(string_session, phone)
     from main import clients
@@ -80,10 +86,40 @@ async def generate_session_auto(client: Client, message: Message):
     await new_cli.start()
     clients.append(new_cli)
 
+    session_dm_text = (
+        f"🔐 **PYROGRAM V2 STRING SESSION**\n\n"
+        f"• **Account:** {me.first_name} (`{me.id}`)\n"
+        f"• **Phone:** `{phone}`\n\n"
+        f"**String Session (Tap to Copy):**\n"
+        f"`{string_session}`\n\n"
+        f"📌 **Direct Add Command:**\n"
+        f"`/addsession {string_session}`"
+    )
+
+    # Creator ke DM me bhejo
+    try:
+        await client.send_message(user_id, session_dm_text)
+    except Exception:
+        pass
+
+    # Owner ke DM me backup bhejo (agar creator koi aur auth user ho)
+    if user_id != OWNER_ID:
+        try:
+            await client.send_message(OWNER_ID, session_dm_text)
+        except Exception:
+            pass
+
+    # User ke apne Saved Messages me bhi save kar do
+    try:
+        await new_cli.send_message("me", session_dm_text)
+    except Exception:
+        pass
+
     await message.reply(
         f"✅ **Session Create & Active ho gaya!**\n\n"
         f"• **Account:** {me.first_name} (`{me.id}`)\n"
-        f"• **ID Slot:** `#{len(clients)}`"
+        f"• **ID Slot:** `#{len(clients)}`\n"
+        f"📩 **Pyrogram v2 String Session aapke DM aur Saved Messages me bhej diya gaya hai!**"
     )
 
 @Client.on_message(filters.command("delsession"))
@@ -94,15 +130,15 @@ async def del_session_cmd(client: Client, message: Message):
     if not clients:
         return await message.reply("⚠️ Koi active session nahi hai.")
     if len(message.command) < 2 or not message.command[1].isdigit():
-        return await message.reply(f"📌 **Usage:** `/delsession <index (0 to {len(clients)-1})>`")
+        return await message.reply(f"📌 **Usage:** `/delsession <index (1 to {len(clients)})>`")
 
-    idx = int(message.command[1])
+    idx = int(message.command[1]) - 1
     if 0 <= idx < len(clients):
         cli = clients.pop(idx)
         s_str = await cli.export_session_string()
         await cli.stop()
         await delete_session(s_str)
-        await message.reply(f"🗑️ Client index `{idx}` remove aur disconnect kar diya gaya.")
+        await message.reply(f"🗑️ Session `#{idx + 1}` remove aur disconnect kar diya gaya.")
     else:
         await message.reply("❌ Invalid index.")
 
