@@ -3,7 +3,7 @@ import time
 import random
 import aiohttp
 from collections import defaultdict, deque
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw
 from pyrogram.types import Message, ChatMemberUpdated
 from pyrogram.enums import ChatMemberStatus
 from database import is_auth, get_chat_settings, update_chat_settings
@@ -27,24 +27,30 @@ GEMINI_FREE_MODELS = [
 ]
 
 _last_alert_time = 0
-_welcomed_users = {}                # {(chat_id, user_id): timestamp} duplicate welcome rokne ke liye
+_welcomed_users = {}
 _casual_msg_counter = defaultdict(int)
 _last_casual_reply = defaultdict(float)
-_chat_memory = defaultdict(lambda: deque(maxlen=10))  # {(chat_id, bot_id, user_id): deque}
+_last_active_girl = {}  # {chat_id: (bot_idx, timestamp)} - bina tag follow-up pakadne ke liye
+_chat_memory = defaultdict(lambda: deque(maxlen=10))
+_vc_raw_hooked = set()
 
-def clean_trigger_words(full_name: str) -> list[str]:
-    # "Jaanvi 🌻" -> ["jaanvi 🌻", "jaanvi"] (emojis hata kar bhi clean first name match kare)
-    words = []
-    fn_lower = full_name.strip().lower()
-    if fn_lower:
-        words.append(fn_lower)
-    alpha_only = re.sub(r"[^a-zA-Z0-9\s]", "", fn_lower).strip()
-    if alpha_only and alpha_only not in words:
-        words.append(alpha_only)
-    first_word = alpha_only.split()[0] if alpha_only.split() else ""
-    if len(first_word) >= 3 and first_word not in words:
-        words.append(first_word)
-    return words
+def extract_name_tokens(full_name: str) -> list[str]:
+    # "Jaanvi 🌻" -> ["jaanvi"]
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", full_name.lower()).strip()
+    tokens = [t for t in cleaned.split() if len(t) >= 3]
+    return tokens
+
+def match_name_in_text(text: str, full_name: str, username: str = None) -> bool:
+    text_l = text.lower()
+    if username and f"@{username.lower()}" in text_l:
+        return True
+    clean_text = re.sub(r"[^a-zA-Z0-9\s]", " ", text_l)
+    text_words = clean_text.split()
+    tokens = extract_name_tokens(full_name)
+    for tok in tokens:
+        if tok in text_words or any(w.startswith(tok) or tok.startswith(w) for w in text_words if len(w) >= 4):
+            return True
+    return False
 
 @Client.on_message(filters.command("chatbot") & filters.group)
 async def toggle_chatbot(client: Client, message: Message):
@@ -54,6 +60,8 @@ async def toggle_chatbot(client: Client, message: Message):
         return
 
     from main import clients
+    ensure_vc_chat_hooks(clients)
+
     chat_id = message.chat.id
     args = message.command[1:]
 
@@ -74,7 +82,7 @@ async def toggle_chatbot(client: Client, message: Message):
     if args[0].lower() in ["off", "disable", "stop"]:
         await update_chat_settings(chat_id, "chatbot", False)
         await update_chat_settings(chat_id, "chatbot_sessions", [])
-        return await message.reply("🔴 **AI Girl Chatbot disabled** for this group.")
+        return await message.reply("🔴 **AI Girl Chatbot disabled** for this group & Voice Chat.")
 
     if not clients:
         return await message.reply("⚠️ **No active userbot sessions found.** Add a session first.")
@@ -108,22 +116,30 @@ async def toggle_chatbot(client: Client, message: Message):
     await message.reply(
         f"💖 **AI Girl Chatbot Enabled!**\n"
         f"• **Active Girls:** {', '.join(names_preview)}\n"
-        f"• **Mode:** Smart Name/Tag Reply + Memory + Request/Join Welcome ✨"
+        f"• **Active In:** Group Chat + Voice Chat Live Messages 🎙️\n"
+        f"• **Features:** Name Call + Follow-up Context + Memory + Request Welcome ✨"
     )
 
-def build_girl_system_prompt(bot_full_name: str, is_welcome: bool = False) -> str:
+def build_girl_system_prompt(bot_full_name: str, is_welcome: bool = False, is_vc: bool = False) -> str:
     if is_welcome:
         return (
-            f"You are {bot_full_name}, a sweet, playful, friendly Indian girl chatting in a Telegram group. "
-            f"Your full display name is {bot_full_name}. "
-            "Welcome the new member warmly in 1 short sentence (max 15 words) using natural Hinglish and cute emojis (✨💖😊🌸). "
-            "Never break character or say you are an AI or bot."
+            f"You are {bot_full_name}, a sweet, playful Indian girl chatting in a Telegram group. "
+            f"Your exact name is {bot_full_name}. "
+            "Welcome the new member warmly in 1 short sentence (max 14 words) in natural Hinglish with 1 or 2 cute emojis (like 🌸, 😊, ✨, 💕). "
+            "Never mention being an AI or bot."
+        )
+    if is_vc:
+        return (
+            f"You are {bot_full_name}, a real Indian girl currently sitting inside a Telegram Voice Chat. "
+            f"Your exact display name is {bot_full_name}. "
+            "Reply very briefly (max 8-12 words) in natural casual Hinglish with 1 or 2 expressive emojis (like 😂, 👀, 🥺, 🔥, ❤️, 🙈). "
+            "Sound like a real girl texting in VC chat. Never say you are an AI."
         )
     return (
         f"You are {bot_full_name}, a cute, witty, real Indian girl chatting in a Telegram group. "
         f"Your exact display name is '{bot_full_name}'. Stay completely in character as {bot_full_name}. "
-        "Remember the previous conversation history with this user and reply naturally in 1 to 2 short Hinglish/English sentences with cute emojis (😊✨💖🙈😂). "
-        "Never write long paragraphs, never repeat the user's exact words, and never say you are an AI or bot."
+        "Remember the conversation history and reply in 1 short natural Hinglish/English sentence (max 15 words) with 1 or 2 varied emojis (😂, 👀, 🥺, 🙈, 💕, ✨, 😅). "
+        "Do NOT repeat the same emojis every time, do NOT repeat user's text, and never say you are an AI or bot."
     )
 
 async def call_groq_pool(session: aiohttp.ClientSession, messages_list: list) -> str:
@@ -145,7 +161,7 @@ async def call_groq_pool(session: aiohttp.ClientSession, messages_list: list) ->
                 gdata = await gresp.json()
                 verdict = gdata["choices"][0]["message"]["content"].strip().lower()
                 if any(bad in verdict for bad in ("jailbreak", "injection", "unsafe")):
-                    return "Hehe nice try, par main itni bhi bholi nahi hu 😜✨"
+                    return "Hehe nice try, par main itni bhi bholi nahi hu 😜"
     except Exception:
         pass
 
@@ -154,8 +170,8 @@ async def call_groq_pool(session: aiohttp.ClientSession, messages_list: list) ->
         payload = {
             "model": model_name,
             "messages": messages_list,
-            "temperature": 0.85,
-            "max_tokens": 200
+            "temperature": 0.9,
+            "max_tokens": 180
         }
         try:
             async with session.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as resp:
@@ -209,12 +225,12 @@ async def call_gemini_pool(session: aiohttp.ClientSession, messages_list: list) 
 
     raise Exception(f"ALL_GEMINI_MODELS_BUSY ({last_err})")
 
-async def ask_girl_ai(prompt: str, bot_full_name: str, history: list = None, is_welcome: bool = False) -> str:
+async def ask_girl_ai(prompt: str, bot_full_name: str, history: list = None, is_welcome: bool = False, is_vc: bool = False) -> str:
     key = str(CHATBOT_API_KEY or "").strip()
     if not key:
         raise Exception("NO_API_KEY_SET")
 
-    sys_prompt = build_girl_system_prompt(bot_full_name, is_welcome=is_welcome)
+    sys_prompt = build_girl_system_prompt(bot_full_name, is_welcome=is_welcome, is_vc=is_vc)
     messages_list = [{"role": "system", "content": sys_prompt}]
     if history:
         messages_list.extend(history)
@@ -245,11 +261,107 @@ def get_enabled_responders(clients, chat_settings):
         return list(enumerate(clients))
     return [(idx, clients[idx]) for idx in saved_indices if 0 <= idx < len(clients)]
 
+# =====================================================================
+# VOICE CHAT LIVE IN-CALL MESSAGES HANDLER (UpdateGroupCallMessage)
+# =====================================================================
+def ensure_vc_chat_hooks(clients):
+    for idx, ubot in enumerate(clients):
+        if id(ubot) in _vc_raw_hooked:
+            continue
+        _vc_raw_hooked.add(id(ubot))
+
+        @ubot.on_raw_update()
+        async def _on_vc_raw_update(cli, update, users, chats, _idx=idx):
+            # Sirf VC ke andar bheje gaye live chat messages pakdo
+            if not isinstance(update, raw.types.UpdateGroupCallMessage):
+                return
+
+            from main import clients as all_clients
+            # Apni hi userbot IDs ke VC messages ignore karo
+            my_ids = set()
+            for c in all_clients:
+                try:
+                    m = await c.get_me()
+                    my_ids.add(m.id)
+                except Exception:
+                    pass
+
+            from_id = getattr(update.message, "from_id", None)
+            sender_id = getattr(from_id, "user_id", None) if from_id else None
+            if not sender_id or sender_id in my_ids:
+                return
+
+            msg_obj = getattr(update.message, "message", None)
+            msg_text = getattr(msg_obj, "message", "") if msg_obj else ""
+            if not msg_text.strip():
+                return
+
+            # Group chat_id resolve karo
+            chat_id = None
+            for cid in chats:
+                chat_id = int(f"-100{cid}") if cid > 0 else cid
+                break
+            if not chat_id:
+                return
+
+            chat_settings = await get_chat_settings(chat_id)
+            responders = get_enabled_responders(all_clients, chat_settings)
+            if not responders:
+                return
+
+            # Sirf pehla enabled responder hi VC message handle kare taaki duplicate reply na ho
+            if responders[0][0] != _idx:
+                return
+
+            # Check karo kya kisi enabled girl ka naam liya gaya hai
+            chosen_ubot = None
+            for r_idx, r_cli in responders:
+                try:
+                    r_me = await r_cli.get_me()
+                    r_name = f"{r_me.first_name or ''} {r_me.last_name or ''}".strip()
+                    if match_name_in_text(msg_text, r_name, r_me.username):
+                        chosen_ubot = r_cli
+                        break
+                except Exception:
+                    pass
+
+            if not chosen_ubot:
+                _, chosen_ubot = random.choice(responders)
+
+            try:
+                me = await chosen_ubot.get_me()
+                bot_full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "Cutie"
+                sender_user = users.get(sender_id)
+                sender_name = getattr(sender_user, "first_name", "Friend") if sender_user else "Friend"
+
+                # Agar sirf emoji bheja hai toh cute emoji/short reply bhejo
+                if len(msg_text.strip()) <= 3 and not any(c.isalnum() for c in msg_text):
+                    reply_text = random.choice(["🙈✨", "😂🔥", "❤️👀", "🥺💕", "Hii 👀✨"])
+                else:
+                    reply_text = await ask_girl_ai(
+                        f"{sender_name} in Voice Chat: {msg_text}",
+                        bot_full_name=bot_full_name,
+                        is_vc=True
+                    )
+
+                # VC ke andar live message bhejo
+                await chosen_ubot.invoke(
+                    raw.functions.phone.SendGroupCallMessage(
+                        call=update.call,
+                        random_id=random.randint(10000, 999999999),
+                        message=raw.types.TextWithEntities(text=reply_text, entities=[])
+                    )
+                )
+            except Exception:
+                pass
+
+# =====================================================================
+# WELCOME HANDLER (Direct Join + Join Request Approve)
+# =====================================================================
 async def send_welcome_tag(client: Client, chat_id: int, chat_title: str, user, reply_to_id: int = None):
     if not user or user.is_bot:
         return
 
-    # Duplicate welcome prevent (agar service message aur chat_member_updated dono fire hon)
     now = time.time()
     key = (chat_id, user.id)
     if now - _welcomed_users.get(key, 0) < 30:
@@ -274,19 +386,17 @@ async def send_welcome_tag(client: Client, chat_id: int, chat_title: str, user, 
         )
         await responder.send_message(
             chat_id,
-            f"✨ {user_tag} {welcome_reply}",
+            f"{user_tag} {welcome_reply}",
             reply_to_message_id=reply_to_id
         )
     except Exception as e:
         await notify_owner_once(client, str(e))
 
-# 1A. Normal Member Join Service Message Welcome
 @Client.on_message(filters.new_chat_members & filters.group, group=9)
 async def welcome_on_service_join(client: Client, message: Message):
     for member in message.new_chat_members:
         await send_welcome_tag(client, message.chat.id, message.chat.title, member, reply_to_id=message.id)
 
-# 1B. Join Request Approve Hone Par Bhi Tag Karke Welcome
 @Client.on_chat_member_updated(filters.group, group=9)
 async def welcome_on_request_approved(client: Client, event: ChatMemberUpdated):
     old_status = event.old_chat_member.status if event.old_chat_member else None
@@ -295,7 +405,9 @@ async def welcome_on_request_approved(client: Client, event: ChatMemberUpdated):
         user = event.new_chat_member.user
         await send_welcome_tag(client, event.chat.id, event.chat.title, user, reply_to_id=None)
 
-# 2. Smart Group Chat Handler (Zero Self-Loop + Name Trigger + Memory + Casual Drop-in)
+# =====================================================================
+# GROUP TEXT HANDLER (Name Call + Follow-up Context + Occasional Tag)
+# =====================================================================
 @Client.on_message(filters.text & filters.group & ~filters.command(["chatbot", "joinvc", "leavevc", "update", "panel", "addallsessions", "vcstatus"]), group=10)
 async def handle_ai_mentions(client: Client, message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -305,7 +417,8 @@ async def handle_ai_mentions(client: Client, message: Message):
     if not clients:
         return
 
-    # CRITICAL FIX: Apni hi userbot IDs ke messages par kabhi reply na kare (Khud se baat band!)
+    ensure_vc_chat_hooks(clients)
+
     all_ubot_ids = set()
     ubot_profiles = {}
     for idx, ubot in enumerate(clients):
@@ -326,50 +439,45 @@ async def handle_ai_mentions(client: Client, message: Message):
     if not responders:
         return
 
-    msg_lower = message.text.lower()
     replied_user_id = (
         message.reply_to_message.from_user.id
         if message.reply_to_message and message.reply_to_message.from_user
         else None
     )
 
-    # Check karo kya kisi enabled girl session ko reply kiya hai ya uske naam se bulaya hai (tag ya bina tag ke)
     chosen_entry = None
     is_direct_call = False
 
+    # 1. Check direct reply or name call (tag ke saath ya bina tag ke)
     for idx, ubot in responders:
         if idx not in ubot_profiles:
             continue
         _, me, full_n = ubot_profiles[idx]
 
-        # Direct reply to that girl ID
         if replied_user_id == me.id:
             chosen_entry = (idx, ubot, me, full_n)
             is_direct_call = True
             break
 
-        # Mentioned by @username or Name (with or without tag)
-        if me.username and f"@{me.username.lower()}" in msg_lower:
+        if match_name_in_text(message.text, full_n, me.username):
             chosen_entry = (idx, ubot, me, full_n)
             is_direct_call = True
             break
 
-        name_triggers = clean_trigger_words(full_n)
-        if any(re.search(rf"\b{re.escape(w)}\b", msg_lower) for w in name_triggers if w.isascii()):
-            chosen_entry = (idx, ubot, me, full_n)
+    # 2. Check Active Conversation Follow-up (agar pichhle 75 sec me kisi girl ne baat ki hai aur user bina tag follow-up bhej raha hai)
+    now = time.time()
+    if not is_direct_call and replied_user_id is None and chat_id in _last_active_girl:
+        last_idx, last_ts = _last_active_girl[chat_id]
+        if (now - last_ts) <= 75 and last_idx in ubot_profiles and any(r_idx == last_idx for r_idx, _ in responders):
+            # Agar message kisi aur member ko nahi bulaya gaya toh active girl reply karegi
+            _, ubot, me, full_n = ubot_profiles[last_idx]
+            chosen_entry = (last_idx, ubot, me, full_n)
             is_direct_call = True
-            break
-        elif any(w in msg_lower for w in name_triggers if not w.isascii()):
-            chosen_entry = (idx, ubot, me, full_n)
-            is_direct_call = True
-            break
 
-    # Agar kisi ne naam nahi liya aur reply bhi nahi kiya -> har kisi ke text par reply nahi karegi!
-    # Sirf beech-beech me (har 12 messages me 1 baar, kam se kam 2 min gap ke baad) naturally baat karegi
+    # 3. Casual beech-beech me bolna (har 10 messages me 1 baar, kam se kam 2 min gap ke baad)
     if not is_direct_call:
         _casual_msg_counter[chat_id] += 1
-        now = time.time()
-        if _casual_msg_counter[chat_id] < 12 or (now - _last_casual_reply[chat_id]) < 120:
+        if _casual_msg_counter[chat_id] < 10 or (now - _last_casual_reply[chat_id]) < 120:
             return
         _casual_msg_counter[chat_id] = 0
         _last_casual_reply[chat_id] = now
@@ -383,7 +491,8 @@ async def handle_ai_mentions(client: Client, message: Message):
             return
         chosen_entry = random.choice(valid_entries)
 
-    _, chosen_ubot, chosen_me, bot_full_name = chosen_entry
+    chosen_idx, chosen_ubot, chosen_me, bot_full_name = chosen_entry
+    _last_active_girl[chat_id] = (chosen_idx, now)
 
     try:
         mem_key = (chat_id, chosen_me.id, message.from_user.id)
@@ -394,16 +503,20 @@ async def handle_ai_mentions(client: Client, message: Message):
             user_prompt,
             bot_full_name=bot_full_name,
             history=history,
-            is_welcome=False
+            is_welcome=False,
+            is_vc=False
         )
 
-        # Memory me save karo taaki purani baat yaad rahe
         _chat_memory[mem_key].append({"role": "user", "content": user_prompt})
         _chat_memory[mem_key].append({"role": "assistant", "content": response})
 
-        sender_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+        # Kabhi-kabhi (25% chance) hi name tag karegi, har reply me tag spam nahi karegi
+        if random.random() < 0.25:
+            sender_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id}) "
+        else:
+            sender_tag = ""
 
-        # Beech-beech me casual message karte waqt kabhi-kabhi kisi random member ko bhi tag kar sakti hai
+        # Casual drop-in ke waqt kabhi-kabhi group ke kisi random member ko bhi tag kar sakti hai
         extra_tag = ""
         if not is_direct_call and random.random() < 0.35:
             try:
@@ -424,7 +537,7 @@ async def handle_ai_mentions(client: Client, message: Message):
 
         await chosen_ubot.send_message(
             chat_id,
-            f"{sender_tag} {response}{extra_tag}",
+            f"{sender_tag}{response}{extra_tag}",
             reply_to_message_id=message.id
         )
     except Exception as e:
