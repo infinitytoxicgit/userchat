@@ -9,7 +9,6 @@ from config import CHATBOT_API_KEY, OWNER_ID
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GUARD_MODEL = "meta-llama/llama-prompt-guard-2-86m"
 
-# Saare Free Groq Models (Priority order me fallback)
 GROQ_FREE_MODELS = [
     "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
@@ -18,7 +17,6 @@ GROQ_FREE_MODELS = [
     "gemma2-9b-it"
 ]
 
-# Saare Free Gemini Models (Agar CHATBOT_API_KEY Google/Gemini ki ho)
 GEMINI_FREE_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
@@ -114,7 +112,6 @@ async def call_groq_pool(session: aiohttp.ClientSession, prompt: str, sys_prompt
         "Content-Type": "application/json"
     }
 
-    # Prompt Guard check
     try:
         guard_payload = {
             "model": GUARD_MODEL,
@@ -199,7 +196,6 @@ async def ask_girl_ai(prompt: str, bot_name: str, is_welcome: bool = False) -> s
     sys_prompt = build_girl_system_prompt(bot_name, is_welcome=is_welcome)
 
     async with aiohttp.ClientSession() as session:
-        # Auto-detect Groq (gsk_...) vs Google Gemini key
         if key.startswith("gsk_"):
             return await call_groq_pool(session, prompt, sys_prompt)
         else:
@@ -208,7 +204,7 @@ async def ask_girl_ai(prompt: str, bot_name: str, is_welcome: bool = False) -> s
 async def notify_owner_once(client: Client, reason: str):
     global _last_alert_time
     now = time.time()
-    if now - _last_alert_time < 600:  # 10 minute cooldown taaki spam na ho
+    if now - _last_alert_time < 600:
         return
     _last_alert_time = now
     try:
@@ -222,4 +218,108 @@ async def notify_owner_once(client: Client, reason: str):
         pass
 
 def get_enabled_responders(clients, chat_settings):
-    if not chat_settings.get("
+    if not chat_settings.get("chatbot", False) or not clients:
+        return []
+    saved_indices = chat_settings.get("chatbot_sessions", [])
+    if not saved_indices:
+        return list(enumerate(clients))
+    return [(idx, clients[idx]) for idx in saved_indices if 0 <= idx < len(clients)]
+
+@Client.on_message(filters.new_chat_members & filters.group, group=9)
+async def welcome_new_member_girl(client: Client, message: Message):
+    from main import clients
+    chat_settings = await get_chat_settings(message.chat.id)
+    responders = get_enabled_responders(clients, chat_settings)
+    if not responders:
+        return
+
+    for member in message.new_chat_members:
+        if member.is_bot:
+            continue
+        _, responder = random.choice(responders)
+        try:
+            me = await responder.get_me()
+            girl_name = me.first_name or "Cutie"
+            user_tag = f"[{member.first_name}](tg://user?id={member.id})"
+            welcome_reply = await ask_girl_ai(
+                f"New member {member.first_name} just joined {message.chat.title}. Welcome them!",
+                bot_name=girl_name,
+                is_welcome=True
+            )
+            await responder.send_message(
+                message.chat.id,
+                f"✨ {user_tag} {welcome_reply}",
+                reply_to_message_id=message.id
+            )
+        except Exception as e:
+            await notify_owner_once(client, str(e))
+
+@Client.on_message(filters.text & filters.group & ~filters.command(["chatbot", "joinvc", "leavevc", "update", "panel", "addallsessions"]), group=10)
+async def handle_ai_mentions(client: Client, message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    from main import clients
+    chat_settings = await get_chat_settings(message.chat.id)
+    responders = get_enabled_responders(clients, chat_settings)
+    if not responders:
+        return
+
+    is_vc_chat = bool(getattr(message, "reply_to_top_message_id", None) or getattr(message, "message_thread_id", None))
+
+    chosen_responder = None
+    replied_user_id = (
+        message.reply_to_message.from_user.id
+        if message.reply_to_message and message.reply_to_message.from_user
+        else None
+    )
+
+    msg_lower = message.text.lower()
+    for _, ubot in responders:
+        try:
+            me = await ubot.get_me()
+            if replied_user_id == me.id:
+                chosen_responder = ubot
+                break
+            if me.first_name and me.first_name.lower() in msg_lower:
+                chosen_responder = ubot
+                break
+        except Exception:
+            pass
+
+    trigger_words = ["hi", "hello", "hey", "oye", "sun", "jaan", "baby", "cutie", "bot", "kaisi", "kya", "kon", "vc"]
+    prob = 0.60 if is_vc_chat else 0.25
+    is_triggered = bool(chosen_responder) or any(w in msg_lower.split() for w in trigger_words) or (random.random() < prob)
+
+    if not is_triggered:
+        return
+
+    if not chosen_responder:
+        _, chosen_responder = random.choice(responders)
+
+    try:
+        me = await chosen_responder.get_me()
+        girl_name = me.first_name or "Cutie"
+        response = await ask_girl_ai(message.text, bot_name=girl_name, is_welcome=False)
+
+        sender_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+        extra_tag = ""
+        if random.random() < 0.20:
+            try:
+                recent_users = []
+                async for m in client.get_chat_history(message.chat.id, limit=15):
+                    if m.from_user and not m.from_user.is_bot and m.from_user.id not in (message.from_user.id, me.id):
+                        recent_users.append(m.from_user)
+                if recent_users:
+                    rnd_u = random.choice(recent_users)
+                    extra_tag = f" (cc: [{rnd_u.first_name}](tg://user?id={rnd_u.id}))"
+            except Exception:
+                pass
+
+        await chosen_responder.send_message(
+            message.chat.id,
+            f"{sender_tag} {response}{extra_tag}",
+            reply_to_message_id=message.id
+        )
+    except Exception as e:
+        await notify_owner_once(client, str(e))
