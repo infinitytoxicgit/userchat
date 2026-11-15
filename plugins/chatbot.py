@@ -7,7 +7,7 @@ from config import CHATBOT_API_KEY, OWNER_ID
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GUARD_MODEL = "meta-llama/llama-prompt-guard-2-86m"
-CHAT_MODEL = "allam-2-7b"
+CHAT_MODEL = "openai/gpt-oss-120b"
 
 @Client.on_message(filters.command("chatbot") & filters.group)
 async def toggle_chatbot(client: Client, message: Message):
@@ -26,7 +26,8 @@ async def toggle_chatbot(client: Client, message: Message):
         status_str = f"🟢 ON for IDs: `{[i + 1 for i in active_ids]}`" if active_ids else "🔴 OFF"
         return await message.reply(
             f"💬 **AI Girl Chatbot Controller**\n"
-            f"• **Current Status:** {status_str}\n\n"
+            f"• **Current Status:** {status_str}\n"
+            f"• **Active Model:** `{CHAT_MODEL}`\n\n"
             f"**Commands:**\n"
             f"• `/chatbot 1` — Enable only ID #1\n"
             f"• `/chatbot 1 2` — Enable ID #1 & #2\n"
@@ -69,6 +70,7 @@ async def toggle_chatbot(client: Client, message: Message):
 
     await message.reply(
         f"💖 **AI Girl Chatbot Enabled!**\n"
+        f"• **Model:** `{CHAT_MODEL}`\n"
         f"• **Active Personas:** {', '.join(names_preview)}\n"
         f"• **Features:** Auto-Reply + Random Tag + New Member Tag Welcome ✨"
     )
@@ -114,7 +116,7 @@ async def ask_girl_ai(prompt: str, bot_name: str, is_welcome: bool = False) -> s
         else:
             sys_prompt = (
                 f"You are {bot_name}, a cute, witty, friendly Indian girl chatting in a Telegram group. "
-                "Always stay in character as a real girl named " + bot_name + ". "
+                f"Always stay in character as a real girl named {bot_name}. "
                 "Reply in 1 to 2 short, natural Hinglish/English sentences with expressive emojis (😊✨💖🙈😂). "
                 "Never write long paragraphs and never mention being an AI or bot."
             )
@@ -126,14 +128,14 @@ async def ask_girl_ai(prompt: str, bot_name: str, is_welcome: bool = False) -> s
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.85,
-            "max_tokens": 80
+            "max_tokens": 90
         }
 
-        async with session.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+        async with session.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status in (401, 429):
                 raise Exception("API_KEY_EXHAUSTED")
             if resp.status != 200:
-                return f"Abhi thoda network slow hai jaan, ek min baad baat karte hain 🙈✨"
+                return "Abhi thoda network slow hai jaan, ek min baad baat karte hain 🙈✨"
             data = await resp.json()
             try:
                 return data["choices"][0]["message"]["content"].strip()
@@ -194,7 +196,6 @@ async def handle_ai_mentions(client: Client, message: Message):
     if not responders:
         return
 
-    # Check karo kya kisi enabled userbot ke naam ya reply par message aaya hai
     chosen_responder = None
     replied_user_id = (
         message.reply_to_message.from_user.id
@@ -229,7 +230,6 @@ async def handle_ai_mentions(client: Client, message: Message):
         girl_name = me.first_name or "Cutie"
         response = await ask_girl_ai(message.text, bot_name=girl_name, is_welcome=False)
 
-        # Sender tag + kabhi-kabhi random member tag
         sender_tag = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
         extra_tag = ""
         if random.random() < 0.20:
